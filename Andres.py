@@ -194,7 +194,7 @@ def extract_text_from_ppt(ppt_file):
 
 from concurrent.futures import ThreadPoolExecutor, as_completed
 
-
+@st.cache_data
 def process_documents(uploaded_files, chunk_size=2000, chunk_overlap=200):
     all_pages = []
     text_splitter = RecursiveCharacterTextSplitter(
@@ -237,7 +237,7 @@ def process_documents(uploaded_files, chunk_size=2000, chunk_overlap=200):
     return all_pages
 
 
-
+@st.cache_resource
 # Función para indexar los documentos
 def index_documents(pages, model_name="sentence-transformers/all-mpnet-base-v2"):
     # Crear una lista de objetos Document
