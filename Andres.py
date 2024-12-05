@@ -50,25 +50,31 @@ class AssistantMessageWindowMemory:
     def recall(self):
         """Recuperar el contexto de la memoria"""
         return " ".join(self.memory)
+    
+
 # Función para preparar el contexto con menos datos
 def prepare_context(memory, search_results=None):
     """Prepara el contexto combinando solo una parte de la memoria y los resultados de búsqueda relevantes"""
     context = memory.recall()  # Recupera la memoria
     if search_results:
-        # Combina solo los primeros 2 resultados más relevantes
+        # Limitar a los primeros 2 resultados más relevantes
         segments = [res.page_content for res in search_results[:2]]  # Usamos solo 2 resultados
         context += " ".join(segments)
     return context
 
-# Función para obtener la respuesta del modelo con límite de tokens
-def get_response(chain, context, user_input):
+
+def get_response(chain, context, user_input, max_context_tokens=500):
     """Obtener la respuesta del modelo limitando el número de tokens y optimizando"""
+    # Limitar el contexto si excede el número de tokens
+    if len(context.split()) > max_context_tokens:
+        context = " ".join(context.split()[:max_context_tokens])
+    # Límite de tokens para la respuesta
+
     return chain.invoke({
         "context": context,
         "question": user_input,
-        "max_tokens": 100  # Limitar la longitud de la respuesta para mayor rapidez
+        "max_tokens": 500  # Limitar la longitud de la respuesta para mayor rapidez
     })
-
 
 # Crear el template del prompt y el parser
 template = """
@@ -186,18 +192,23 @@ def extract_text_from_ppt(ppt_file):
                 text += shape.text + "\n"
     return text
 
+from concurrent.futures import ThreadPoolExecutor, as_completed
+
+
 def process_documents(uploaded_files, chunk_size=2000, chunk_overlap=200):
     all_pages = []
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,
-        chunk_overlap=chunk_overlap,
-        length_function=len,
-        is_separator_regex=False,
+        chunk_size=chunk_size,  # Ajusta el tamaño del fragmento
+        chunk_overlap=chunk_overlap,  # Ajusta el solapamiento
+        length_function=len,  # Usar la longitud de caracteres para dividir
+        is_separator_regex=False,  # No usar un separador regex
     )
+    
     for uploaded_file in uploaded_files:
         file_type = uploaded_file.name.split(".")[-1].lower()
         text = ""
         
+        # Procesar cada tipo de archivo
         if file_type == "pdf":
             text = extract_text_from_pdf(uploaded_file)
         elif file_type in ["docx", "doc"]:
@@ -209,10 +220,22 @@ def process_documents(uploaded_files, chunk_size=2000, chunk_overlap=200):
             continue
         
         if text:
-            # Cambia split por split_text
+            # Dividir el texto en fragmentos
             chunks = text_splitter.split_text(text)
+
+            # Verificar si algún fragmento excede el límite de tokens
+            max_tokens = 5000  # Establece el límite de tokens
+            for chunk in chunks:
+                num_tokens = len(chunk.split())  # Contamos los tokens basados en espacios (simplificación)
+                if num_tokens > max_tokens:
+                    st.error(f"El fragmento excede el límite de tokens. Fragmento de {num_tokens} tokens.")
+                    continue  # O puedes decidir cómo manejarlo (ignorar, truncar, etc.)
+            
+            # Agregar los fragmentos a la lista
             all_pages.extend(chunks)
+    
     return all_pages
+
 
 
 # Función para indexar los documentos
@@ -257,7 +280,7 @@ if uploaded_files:
     else:
         st.warning("No se encontraron archivos válidos para procesar.")
 
-# Entrada de la pregunta del médico
+# Obtener la entrada del usuario y el contexto
 if user_input := st.chat_input("Escribe tu pregunta aquí..."):
     # Agregar la pregunta a la memoria
     st.session_state.memory.remember(user_input)
@@ -268,25 +291,32 @@ if user_input := st.chat_input("Escribe tu pregunta aquí..."):
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Obtener el contexto (memoria + resultados de búsqueda limitados)
+    # Obtener los resultados de búsqueda
     search_results = retriever.invoke(user_input) if retriever else None
+    
+    # Aquí definimos el contexto con memoria + resultados de búsqueda
     context = prepare_context(st.session_state.memory, search_results)
 
-    # Obtener respuesta del asistente virtual con RAG
+    # Asegúrate de no exceder el límite de tokens
+    max_tokens = 5000
+
     try:
+        # Realizar la llamada al modelo usando el contexto
         response = None
         if retriever:
+            # Si estás usando el recuperador (retriever), añades los fragmentos obtenidos
             search_results = retriever.invoke(user_input)
             segments = [i.page_content for i in search_results]
-            response = chain.invoke({"context": context + " ".join(segments), "question": user_input})
+            response = chain.invoke({"context": context + " ".join(segments), "question": user_input, "max_tokens": max_tokens})
         else:
-            response = chain.invoke({"context": context, "question": user_input})
+            response = chain.invoke({"context": context, "question": user_input, "max_tokens": max_tokens})
 
         # Agregar la respuesta al historial de mensajes
         st.session_state.messages.append({"role": "assistant", "content": response})
 
-        # Mostrar la respuesta del asistente
+        # Mostrar la respuesta
         with st.chat_message("assistant"):
             st.markdown(response)
+
     except Exception as e:
         st.error(f"Error al obtener respuesta: {e}")
