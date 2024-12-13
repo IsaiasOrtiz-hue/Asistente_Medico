@@ -9,76 +9,56 @@ from langchain_community.document_loaders import PyPDFLoader
 from langchain_community.vectorstores import FAISS
 from langchain_huggingface import HuggingFaceEmbeddings
 from langchain_text_splitters import RecursiveCharacterTextSplitter
-from docx import Document  # Para leer archivos Word
-from pptx import Presentation  # Para leer archivos PowerPoint
+from docx import Document
+from pptx import Presentation
 from langchain.schema import Document
-from dotenv import load_dotenv
-import os
 
-# Cargar las variables del archivo .env
-load_dotenv()
 
-# Obtener las variables
-groq_api_key = os.getenv('GROQ_API_KEY')
-model_name = os.getenv('MODEL_NAME')
-
-# Verificar si las variables están bien cargadas
-if not groq_api_key or not model_name:
-    print("Error: API key o nombre de modelo no están configurados correctamente.")
-    exit()
-
-# Inicializar el modelo de chat
-try:
-    chat = ChatGroq(
-        temperature=0,  # Configuración de la temperatura para la generación de respuestas
-        groq_api_key=groq_api_key,
-        model_name=model_name
-    )
-    print("Modelo de chat inicializado correctamente.")
-except Exception as e:
-    print(f"Error al inicializar el modelo: {e}")
-
-# Clase para la memoria de la ventana de mensajes
+# Configurar el modelo con una memoria limitada de tamaño
 class AssistantMessageWindowMemory:
-    def __init__(self, window_size=2):
+    def __init__(self, window_size=2):  # Reducir ventana de memoria
         self.memory = deque(maxlen=window_size)
 
     def remember(self, user_input):
-        """Añadir la entrada del usuario a la memoria"""
+        """Agregar el input del usuario a la memoria."""
         self.memory.append(user_input)
 
     def recall(self):
-        """Recuperar el contexto de la memoria"""
+        """Recuperar el contexto de la memoria."""
         return " ".join(self.memory)
     
-
-# Función para preparar el contexto con menos datos
+# Limitar el número de fragmentos combinados en el contexto
 def prepare_context(memory, search_results=None):
-    """Prepara el contexto combinando solo una parte de la memoria y los resultados de búsqueda relevantes"""
-    context = memory.recall()  # Recupera la memoria
+    """Preparar el contexto combinando la memoria con resultados de búsqueda si existen."""
+    context = memory.recall()  # Usar memoria actual
     if search_results:
-        # Limitar a los primeros 2 resultados más relevantes
-        segments = [res.page_content for res in search_results[:2]]  # Usamos solo 2 resultados
+        # Combinar solo los primeros 3 resultados de búsqueda más relevantes
+        segments = [res.page_content for res in search_results[:3]]
         context += " ".join(segments)
     return context
 
-
-def get_response(chain, context, user_input, max_context_tokens=500):
-    """Obtener la respuesta del modelo limitando el número de tokens y optimizando"""
-    # Limitar el contexto si excede el número de tokens
-    if len(context.split()) > max_context_tokens:
-        context = " ".join(context.split()[:max_context_tokens])
-    # Límite de tokens para la respuesta
-
+# Función para obtener una respuesta más corta y directa
+def get_response(chain, context, user_input):
+    """Obtener la respuesta utilizando el modelo con un límite de longitud de tokens."""
     return chain.invoke({
         "context": context,
         "question": user_input,
-        "max_tokens": 500  # Limitar la longitud de la respuesta para mayor rapidez
+        "max_tokens": 150  # Limitar la longitud de la respuesta
     })
+
+# Configuración del asistente virtual
+GROQ_API_KEY = "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"
+MODEL_NAME = "mixtral-8x7b-32768"
+
+# Inicializar el modelo de chat
+chat = ChatGroq(
+    temperature=0,
+    groq_api_key=GROQ_API_KEY,
+    model_name=MODEL_NAME
+)
 
 # Crear el template del prompt y el parser
 template = """
-    System prompt:
     Eres un asistente médico llamado Andres experto diseñado para responder preguntas y resolver dudas sobre temas relacionados con la salud. Tienes un amplio conocimiento en medicina general, especialidades clínicas, administración médica, y también en educación para estudiantes de medicina.
 
 Tus respuestas deben adaptarse según el nivel de conocimiento de la persona que realiza la pregunta, y debes manejar con precisión tanto consultas técnicas como no técnicas. Aquí están los grupos de usuarios con los que interactuarás:
@@ -157,16 +137,47 @@ Tu objetivo es proporcionar respuestas útiles, personalizadas y verificables en
 
 Este **System Prompt** está diseñado para garantizar que el asistente médico pueda proporcionar respuestas precisas y basadas en evidencia, mientras prioriza documentos adjuntos y solo usa fuentes confiables de la web cuando sea necesario.
 
-
-    Contexto anterior: {context}
-    Pregunta: {question}
+System prompt: {context}
+Pregunta: {question}
 """
 prompt = ChatPromptTemplate.from_template(template)
 parser = StrOutputParser()
-
-# Encadenar prompt, chat y parser
 chain = prompt | chat | parser
 
+# Función para fragmentar textos extensos
+def split_large_text(text, chunk_size=1000, chunk_overlap=200):
+    splitter = RecursiveCharacterTextSplitter(
+        chunk_size=chunk_size,
+        chunk_overlap=chunk_overlap
+    )
+    return splitter.split_text(text)
+
+# Función para procesar documentos cargados
+def process_documents(uploaded_files, chunk_size=1000, chunk_overlap=200):
+    all_chunks = []
+    for uploaded_file in uploaded_files:
+        file_type = uploaded_file.name.split(".")[-1].lower()
+        text = ""
+        
+        try:
+            if file_type == "pdf":
+                text = extract_text_from_pdf(uploaded_file)
+            elif file_type in ["docx", "doc"]:
+                text = extract_text_from_word(uploaded_file)
+            elif file_type in ["pptx", "ppt"]:
+                text = extract_text_from_ppt(uploaded_file)
+            else:
+                st.error(f"Formato no soportado: {file_type}")
+                continue
+
+            chunks = split_large_text(text, chunk_size, chunk_overlap)
+            all_chunks.extend(chunks)
+        except Exception as e:
+            st.error(f"Error al procesar {uploaded_file.name}: {e}")
+
+    return all_chunks
+
+# Función para extraer texto de archivos
 def extract_text_from_pdf(pdf_file):
     text = ""
     with fitz.open(stream=pdf_file.read(), filetype="pdf") as pdf_document:
@@ -174,149 +185,76 @@ def extract_text_from_pdf(pdf_file):
             text += page.get_text()
     return text
 
-# Función para extraer texto de un archivo Word (.docx)
 def extract_text_from_word(doc_file):
     doc = Document(doc_file)
-    text = ""
-    for para in doc.paragraphs:
-        text += para.text + "\n"
-    return text
+    return "\n".join(para.text for para in doc.paragraphs)
 
-# Función para extraer texto de una presentación PowerPoint (.pptx)
 def extract_text_from_ppt(ppt_file):
     prs = Presentation(ppt_file)
-    text = ""
-    for slide in prs.slides:
-        for shape in slide.shapes:
-            if hasattr(shape, "text"):
-                text += shape.text + "\n"
-    return text
+    return "\n".join(shape.text for slide in prs.slides for shape in slide.shapes if hasattr(shape, "text"))
 
-from concurrent.futures import ThreadPoolExecutor, as_completed
-
-@st.cache_data
-def process_documents(uploaded_files, chunk_size=2000, chunk_overlap=200):
-    all_pages = []
-    text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size=chunk_size,  # Ajusta el tamaño del fragmento
-        chunk_overlap=chunk_overlap,  # Ajusta el solapamiento
-        length_function=len,  # Usar la longitud de caracteres para dividir
-        is_separator_regex=False,  # No usar un separador regex
-    )
-    
-    for uploaded_file in uploaded_files:
-        file_type = uploaded_file.name.split(".")[-1].lower()
-        text = ""
-        
-        # Procesar cada tipo de archivo
-        if file_type == "pdf":
-            text = extract_text_from_pdf(uploaded_file)
-        elif file_type in ["docx", "doc"]:
-            text = extract_text_from_word(uploaded_file)
-        elif file_type in ["pptx", "ppt"]:
-            text = extract_text_from_ppt(uploaded_file)
-        else:
-            st.error(f"Formato de archivo no soportado: {file_type}")
-            continue
-        
-        if text:
-            # Dividir el texto en fragmentos
-            chunks = text_splitter.split_text(text)
-
-            # Verificar si algún fragmento excede el límite de tokens
-            max_tokens = 5000  # Establece el límite de tokens
-            for chunk in chunks:
-                num_tokens = len(chunk.split())  # Contamos los tokens basados en espacios (simplificación)
-                if num_tokens > max_tokens:
-                    st.error(f"El fragmento excede el límite de tokens. Fragmento de {num_tokens} tokens.")
-                    continue  # O puedes decidir cómo manejarlo (ignorar, truncar, etc.)
-            
-            # Agregar los fragmentos a la lista
-            all_pages.extend(chunks)
-    
-    return all_pages
-
-
-@st.cache_resource
-# Función para indexar los documentos
-def index_documents(pages, model_name="sentence-transformers/all-mpnet-base-v2"):
-    # Crear una lista de objetos Document
-    documents = [Document(page_content=page) for page in pages]  # Usa "page_content" en lugar de "content"
-    
-    # Crear embeddings con HuggingFace
-    hf = HuggingFaceEmbeddings(model_name=model_name, model_kwargs={'device': 'cpu'})
-    
-    # Indexar documentos con FAISS
-    faiss = FAISS.from_documents(documents, hf)
-    return faiss.as_retriever(search_kwargs={"k": 5})
+# Función para indexar documentos
+def index_documents(chunks, model_name="sentence-transformers/all-mpnet-base-v2"):
+    documents = [Document(page_content=chunk) for chunk in chunks]
+    embeddings = HuggingFaceEmbeddings(model_name=model_name, model_kwargs={'device': 'cpu'})
+    retriever = FAISS.from_documents(documents, embeddings).as_retriever(search_kwargs={"k": 8})
+    return retriever
 
 # Configuración de la interfaz de usuario en Streamlit
 st.set_page_config(page_title="Asistente Virtual Médico", page_icon="🩺")
 st.title("🩺 Asistente Virtual Médico")
-st.write("Interactúa con tu asistente médico personal. Pregunta lo que necesites.")
+st.write("Interactúa con tu asistente médico. Pregunta lo que necesites.")
 
-# Crear o recuperar el historial de chat y la memoria
+# Crear historial de chat y memoria
 if "messages" not in st.session_state:
     st.session_state.messages = []
 if "memory" not in st.session_state:
-    st.session_state.memory = AssistantMessageWindowMemory(window_size=10)  # Ajusta el tamaño de la ventana según necesites
+    st.session_state.memory = AssistantMessageWindowMemory(window_size=10)
 
 # Mostrar el historial de chat
 for message in st.session_state.messages:
     with st.chat_message(message["role"]):
         st.markdown(message["content"])
 
-# **Cambio aquí:** Utilizar un buscador de archivos con file uploader para PDF, Word y PPT
-uploaded_files = st.file_uploader("Selecciona los archivos PDF, Word o PowerPoint con historiales clínicos:", type=["pdf", "docx", "pptx"], accept_multiple_files=True)
+# Subir y procesar archivos
+uploaded_files = st.file_uploader("Sube tus archivos:", type=["pdf", "docx", "pptx"], accept_multiple_files=True)
 
-# Procesar los archivos cargados y realizar la indexación RAG
 retriever = None
 if uploaded_files:
-    all_pages = process_documents(uploaded_files)
-    
-    if all_pages:
-        retriever = index_documents(all_pages)
-        st.success("Archivos procesados y documentos indexados con éxito. Ahora puedes hacer preguntas sobre su contenido.")
-    else:
-        st.warning("No se encontraron archivos válidos para procesar.")
+    chunks = process_documents(uploaded_files)
+    if chunks:
+        retriever = index_documents(chunks)
+        st.success("Archivos indexados con éxito. ¡Listo para consultas!")
 
-# Obtener la entrada del usuario y el contexto
+if 'messages' not in st.session_state:
+    st.session_state.messages = []
+
+if 'memory' not in st.session_state:
+    st.session_state.memory = AssistantMessageWindowMemory()
+
+# Entrada del usuario
 if user_input := st.chat_input("Escribe tu pregunta aquí..."):
-    # Agregar la pregunta a la memoria
     st.session_state.memory.remember(user_input)
-    # Agregar la pregunta al historial de mensajes
     st.session_state.messages.append({"role": "user", "content": user_input})
 
-    # Mostrar la pregunta del usuario
     with st.chat_message("user"):
         st.markdown(user_input)
 
-    # Obtener los resultados de búsqueda
-    search_results = retriever.invoke(user_input) if retriever else None
-    
-    # Aquí definimos el contexto con memoria + resultados de búsqueda
-    context = prepare_context(st.session_state.memory, search_results)
-
-    # Asegúrate de no exceder el límite de tokens
-    max_tokens = 5000
+    context = st.session_state.memory.recall()
 
     try:
-        # Realizar la llamada al modelo usando el contexto
         response = None
         if retriever:
-            # Si estás usando el recuperador (retriever), añades los fragmentos obtenidos
             search_results = retriever.invoke(user_input)
-            segments = [i.page_content for i in search_results]
-            response = chain.invoke({"context": context + " ".join(segments), "question": user_input, "max_tokens": max_tokens})
+            relevant_texts = [doc.page_content for doc in search_results]
+            input_text = " ".join(relevant_texts)
+            input_text = input_text[:3000]  # Reducir tamaño si es necesario
+            response = chain.invoke({"context": context + input_text, "question": user_input})
         else:
-            response = chain.invoke({"context": context, "question": user_input, "max_tokens": max_tokens})
+            response = chain.invoke({"context": context, "question": user_input})
 
-        # Agregar la respuesta al historial de mensajes
         st.session_state.messages.append({"role": "assistant", "content": response})
-
-        # Mostrar la respuesta
         with st.chat_message("assistant"):
             st.markdown(response)
-
     except Exception as e:
         st.error(f"Error al obtener respuesta: {e}")
